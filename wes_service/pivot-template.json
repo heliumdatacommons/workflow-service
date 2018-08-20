@@ -1,0 +1,85 @@
+{
+    "id": "wes-workflow",
+    "containers": [
+        {
+            "id": "zookeeper",
+            "type": "service",
+            "resources": {
+                "cpus": 1,
+                "mem": 1024,
+                "disk": 4096
+            },
+            "network_mode": "container",
+            "image": "heliumdatacommons/zookeeper",
+            "is_privileged": true,
+            "ports": [
+                {
+                    "container_port": 2181,
+                    "host_port": 0,
+                    "protocol": "tcp"
+                }
+            ]
+        },
+        {
+            "id": "chronos",
+            "type": "service",
+            "resources": {
+                "cpus": 2,
+                "mem": 4096,
+                "disk": 4096
+            },
+            "network_mode": "container",
+            "image": "heliumdatacommons/chronos",
+            "is_privileged": true,
+            "ports": [
+                {
+                    "container_port": 8080,
+                    "host_port": 0,
+                    "protocol": "tcp"
+                }
+            ],
+            "args": [
+                "--master",
+                "zk://zk-1.zk:2181,zk-2.zk:2181,zk-3.zk:2181,zk-4.zk:2181,zk-5.zk:2181/mesos",
+                "--zk_hosts",
+                "@zookeeper:2181"
+            ],
+            "dependencies": [
+                "zookeeper"
+            ]
+        },
+        {
+            "id": "toil-launcher",
+            "type": "job",
+            "resources": {
+                "cpus": 1,
+                "mem": 3072,
+                "disk": 4096
+            },
+            "network_mode": "bridge",
+            "image": "heliumdatacommons/datacommons-base",
+            "is_privileged": true,
+            "ports": [
+                {
+                    "container_port": 22,
+                    "host_port": 0,
+                    "protocol": "tcp"
+                }
+            ],
+            "env": {
+            },
+            "args": [
+            ],
+            "dependencies": [
+                "chronos"
+            ],
+            "volumes": [
+                {
+                    "host_path": "/toil-intermediate",
+                    "container_path": "/toil-intermediate",
+                    "mode": "RW"
+                }
+            ]
+        }
+    ]
+}
