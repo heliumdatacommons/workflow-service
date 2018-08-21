@@ -61,11 +61,13 @@ class PivotBackend(WESBackend):
             os.mkdir(self.workdir)
 
     def get_env_vars(self, authorization):
-        user = ''
-        password = ''
-        zone = ''
-        host = ''
-        ssh_pubkey = ''
+        with open('helium.json') as f:
+            helium_conf = json.load(f)
+        user = helium_conf['irods_user']
+        password = helium_conf['irods_password']
+        zone = helium_conf['irods_zone']
+        host = helium_conf['irods_host']
+        ssh_pubkey = helium_conf['ssh_pubkey']
         # TODO pick up user from authorization key
         env = { 
             'CHRONOS_URL': 'http://@chronos:8080',
@@ -311,7 +313,20 @@ class PivotBackend(WESBackend):
             }
 
     def GetRunStatus(self, run_id):
-        pass
+        run_json = '/toil-intermediate/wes/' + run_id + '/run.json'
+        if not os.path.exists(run_json):
+            return {
+                'msg': 'The requested Workflow wasn\'t found',
+                'status_code': 404
+            }, 404
+        state, _ = self._get_pivot_job_status(run_id, run_json_to_update=run_json)
+        with open(run_json) as f:
+            run = json.load(f)
+        return {
+            'workflow_id': run_id,
+            'state': state
+        }
+
 
 def create_backend(app, opts):
     return PivotBackend(opts)

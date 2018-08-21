@@ -1,5 +1,10 @@
 {
-    "auth_service_url": "",
-    "auth_service_key": "",
-    "pivot_endpoint": ""
+    "auth_service_url": ,
+    "auth_service_key": ,
+    "pivot_endpoint": ,
+    "irods_user": ,
+    "irods_password": ,
+    "irods_zone": ,
+    "irods_host": ,
+    "ssh_pubkey": 
 }

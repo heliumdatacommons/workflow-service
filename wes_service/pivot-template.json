@@ -25,8 +25,8 @@
             "type": "service",
             "resources": {
                 "cpus": 2,
-                "mem": 4096,
-                "disk": 4096
+                "mem": 8192,
+                "disk": 8192
             },
             "network_mode": "container",
             "image": "heliumdatacommons/chronos",
@@ -52,7 +52,7 @@
             "id": "toil-launcher",
             "type": "job",
             "resources": {
-                "cpus": 1,
+                "cpus": 2,
                 "mem": 3072,
                 "disk": 4096
             },
