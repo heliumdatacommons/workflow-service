@@ -1,3 +1,6 @@
+# config files
+wes_service/helium.json
+
 # Don't include the python package's copy of the swagger
 python/ga4gh/dos/data_object_service.swagger.yaml
 
