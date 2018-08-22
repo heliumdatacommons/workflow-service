@@ -100,14 +100,17 @@ class PivotBackend(WESBackend):
         runs = []
         base_url = connexion.request.base_url
         for dirent in os.listdir(self.workdir):
-            print('checking {}'.format(dirent))
+            #print('checking {}'.format(dirent))
             d1 = os.path.join(self.workdir, dirent)
             if os.path.isdir(d1):
                 run_json = os.path.join(d1, 'run.json')
                 if os.path.exists(run_json):
                     with open(run_json) as f:
                         run = json.load(f)
+                        #if run['status'] not in ['COMPLETE', 'CANCELED']:
+                            # don't query for workflows that are terminated
                         workflow_status, app_status = self._get_pivot_job_status(run['run_id'], run_json_to_update=run_json)
+
                         listobj = {
                             'workflow_id': run['run_id'],
                             'state': workflow_status
@@ -116,6 +119,7 @@ class PivotBackend(WESBackend):
                             listobj['appliance_url'] = self.pivot_endpoint + '/wes-workflow-' + listobj['workflow_id'] + '/ui'
                             listobj['appliance_status'] = app_status
                             listobj['workflow_log'] = base_url + '/' + run['run_id']
+                            listobj['start_time'] = run['start_time']
                         runs.append(listobj)
                 else:
                     print('{} is not a workflow run'.format(dirent))
@@ -145,7 +149,7 @@ class PivotBackend(WESBackend):
             cmd.append('{}={}'.format(k,v))
 
         cmd.extend(['heliumdatacommons/datacommons-base:latest', '_toil_exec'])
-        wf_location = 'https://raw.githubusercontent.com/DataBiosphere/topmed-workflows/d40a05772f5c832fe1bdce898aaa19698b43edbd/aligner/sbg-alignment-cwl/topmed-alignment.cwl'
+        #wf_location = 'https://raw.githubusercontent.com/DataBiosphere/topmed-workflows/d40a05772f5c832fe1bdce898aaa19698b43edbd/aligner/sbg-alignment-cwl/topmed-alignment.cwl'
         jobinput_location = '/renci/irods/home/wes_user/NWD176325-0005-recab.json'
 
         rundir = '{workdir}/{run_id}'.format(workdir=self.workdir, run_id=run_id)
@@ -153,11 +157,10 @@ class PivotBackend(WESBackend):
         stderr_path = rundir + '/stderr.txt'
         if not os.path.exists(rundir):
             os.mkdir(rundir)
-        #with open(stdout_path, 'w') as fout:
-        #    with open(stderr_path, 'w') as ferr:
-        #        print('running:[{}]'.format(' '.join(cmd)))
-        #        proc = subprocess.Popen(cmd, stdout=fout, stdin=ferr, universal_newlines=True)
         
+        # create empty stdout file to avoid filenotfound later
+        open(stdout_path, 'a').close()
+
         wf_location = body['workflow_url']
 
         # create job file
@@ -239,22 +242,30 @@ class PivotBackend(WESBackend):
         else:
             appliance_status = 'P_EXIST'
             data = json.loads(response.content.decode('utf-8'))
-            launcher = [c for c in data['containers'] if c['id'] == 'toil-launcher'][0]
+            launcher = [c for c in data['containers'] if c['id'] == 'toil-launcher']
+            if len(launcher) == 0: # no launcher container was part of this appliance
+                launcher = {'state':'COMPLETED'}
+                # bad state, do cleanup
+            else:
+                launcher = launcher[0]
+
             if launcher['state'] == 'running':
                 status = 'RUNNING'
             elif launcher['state'] == 'success':
                 status = 'COMPLETE'
             elif launcher['state'] == 'pending':
+                status = 'INITIALIZING'
+            elif launcher['state'] == 'submitted':
                 status = 'QUEUED'
             else:
                 status = 'SYSTEM_ERROR'
                 print('_get_pivot_job_status, status: {}'.format(status))
                 print('_get_pivot_job_status: {}'.format(response.content.decode('utf-8')))
-        
+
         if run_json_to_update:
             with open(run_json_to_update, 'r') as fin:
                 run = json.load(fin)
-                print(json.dumps(run))
+                #print(json.dumps(run))
                 run_launcher = [o for o in run['X-appliance_json']['containers'] if o['id'] == 'toil-launcher'][0]
                 if status != run['status']:
                     run_launcher['status'] = status
@@ -271,8 +282,13 @@ class PivotBackend(WESBackend):
 
     def GetRunLog(self, run_id):
         #TODO careful with this data size, could be large
-        with open('/toil-intermediate/wes/'+run_id+'/stdout.txt') as stdout:
-            out_data = stdout.read()
+        stdout_path = '/toil-intermediate/wes/' + run_id + '/stdout.txt'
+        if os.path.exists(stdout_path):
+            with open(stdout_path) as stdout:
+                out_data = stdout.read()
+        else:
+            out_data = ''
+
         run_json = '/toil-intermediate/wes/'+run_id+'/run.json'
         if not os.path.exists(run_json):
             return {'msg': 'workflow run not found', 'status_code': 404}, 404
