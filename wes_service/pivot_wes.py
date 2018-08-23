@@ -18,7 +18,10 @@ from wes_service.util import WESBackend
 logging.basicConfig(level=logging.INFO)
 DEBUG = True
 
-def require_user_key(func):
+"""
+Checks a request's authorization header for a valid APIKey value
+"""
+def check_user_key(func):
     def wrapper(*args, **kwargs):
         valid = False
         unauthorized = ('The request is unauthorized.', 401)
@@ -120,6 +123,7 @@ class PivotBackend(WESBackend):
                             listobj['appliance_status'] = app_status
                             listobj['workflow_log'] = base_url + '/' + run['run_id']
                             listobj['start_time'] = run['start_time']
+                            listobj['request'] = {'workflow_descriptor': run['request']['workflow_descriptor']}
                         runs.append(listobj)
                 else:
                     print('{} is not a workflow run'.format(dirent))
@@ -282,10 +286,12 @@ class PivotBackend(WESBackend):
 
     def GetRunLog(self, run_id):
         #TODO careful with this data size, could be large
+        MAX_STDOUT_LEN = 500 # lines of stdout to return
         stdout_path = '/toil-intermediate/wes/' + run_id + '/stdout.txt'
         if os.path.exists(stdout_path):
             with open(stdout_path) as stdout:
                 out_data = stdout.read()
+                out_data = '\n'.join(out_data.rsplit('\n', MAX_STDOUT_LEN)[1:])
         else:
             out_data = ''
 
@@ -300,6 +306,7 @@ class PivotBackend(WESBackend):
                 'workflow_id': run_id,
                 'state': status,
                 'request': run['request'],
+                'appliance_url': self.pivot_endpoint + '/wes-workflow-' + run_id + '/ui', # TODO Remove
                 'workflow_log': {
                     'name': 'stdout',
                     'start_time': run['start_time'],
