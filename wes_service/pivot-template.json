@@ -47,7 +47,17 @@
             ],
             "dependencies": [
                 "zookeeper"
-            ]
+            ],
+            "health_check": {
+                "protocol": "MESOS_HTTP",
+                "port_index": 0,
+                "path": "/",
+                "grace_period_seconds": 120,
+                "timeout_seconds": 5,
+                "interval_seconds": 5,
+                "max_consecutive_failures": 10
+            },
+            "minimum_capacity": 1
         },
         {
             "id": "toil-launcher",
