@@ -6,7 +6,7 @@
             "type": "service",
             "resources": {
                 "cpus": 1,
-                "mem": 3072,
+                "mem": 2048,
                 "disk": 2048
             },
             "network_mode": "container",
@@ -25,7 +25,7 @@
             "type": "service",
             "resources": {
                 "cpus": 2,
-                "mem": 8192,
+                "mem": 4096,
                 "disk": 8192
             },
             "network_mode": "container",
@@ -61,13 +61,13 @@
         },
         {
             "id": "toil-launcher",
-            "type": "job",
+            "type": "service",
             "resources": {
                 "cpus": 2,
-                "mem": 3072,
-                "disk": 4096
+                "mem": 2048,
+                "disk": 3072
             },
-            "network_mode": "bridge",
+            "network_mode": "container",
             "image": "heliumdatacommons/datacommons-base",
             "is_privileged": true,
             "ports": [
