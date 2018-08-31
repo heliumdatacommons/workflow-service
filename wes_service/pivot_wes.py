@@ -1,9 +1,7 @@
 from __future__ import print_function
-import flask
 import json
 import os
 import subprocess
-import requests
 import time
 import logging
 import uuid
@@ -13,45 +11,54 @@ import six
 import json
 import datetime
 from multiprocessing import Process
+import flask
+import requests
 from wes_service.util import WESBackend
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 DEBUG = True
 
 """
 Checks a request's authorization header for a valid APIKey value
+If invalid returns {'status_code': 401, 'msg': <msg>}
+If valid returns {'status_code': 200, 'user': <user>, 'key': <key>}
+If error returns {'status_code': 500, 'msg': <msg>}
 """
-def check_user_key(func):
-    def wrapper(*args, **kwargs):
-        valid = False
-        unauthorized = ('The request is unauthorized.', 401)
-        authorization = connexion.request.headers.get('Authorization', None)
-        if not authorization:
-            return unauthorized
-        terms = authorization.split()
-        if len(terms) == 1:
-            user_key = terms[0]
-        elif len(terms) >= 2:
-            if terms[0] == 'APIKey':
-                user_key = terms[1]
-            else:
-                return ('Malformed authorization', 400)
-
-        # got a user key so check it
-        with open('helium.json') as f:
-            helium_conf = json.load(f)
-	auth_service_key = helium_conf['auth_service_key']
-        auth_headers = {'Authorization': 'Basic ' + auth_service_key}
-	auth_service_url = helium_conf['auth_service_url']
-        auth_response = requests.get(auth_service_url + '/apikey/verify?key=' + user_key, headers=auth_headers)
-        if auth_response.status_code == 200:
-            valid = True
-
-        if valid:
-            return func(*args, **kwargs)
+def check_user_key():
+    valid = False
+    ret_invalid = {'msg': 'The request is unauthorized.', 'status_code': 401}
+    authorization = connexion.request.headers.get('Authorization', None)
+    if not authorization:
+        return ret_invalid
+    terms = authorization.split()
+    if len(terms) == 1:
+        user_key = terms[0]
+    elif len(terms) >= 2:
+        if terms[0] == 'APIKey':
+            user_key = terms[1]
         else:
-            return unauthorized
-    return wrapper
+            return ('Malformed authorization', 400)
+
+    # got a user key so check it
+    with open('helium.json') as f:
+        helium_conf = json.load(f)
+    auth_service_key = helium_conf['auth_service_key']
+    auth_headers = {'Authorization': 'Basic {}'.format(auth_service_key)}
+    auth_service_url = helium_conf['auth_service_url']
+    auth_response = requests.get(auth_service_url + '/apikey/verify?key=' + user_key, headers=auth_headers)
+    if auth_response.status_code == 200:
+        valid = True
+    content = json.loads(auth_response.content.decode('utf-8'))
+    if valid:
+        if 'user_name' not in content:
+            return ('Failed to check authorization', 500)
+        return {
+            'status_code': 200,
+            'user': content['user_name'],
+            'key': user_key
+        }
+    else:
+        return ret_invalid
 
 class PivotBackend(WESBackend):
     def __init__(self, opts):
@@ -70,18 +77,19 @@ class PivotBackend(WESBackend):
         password = helium_conf['irods_password']
         zone = helium_conf['irods_zone']
         host = helium_conf['irods_host']
-        ssh_pubkey = helium_conf['ssh_pubkey']
+        ssh_pubkey = helium_conf.get('ssh_pubkey', None)
         # TODO pick up user from authorization key
-        env = { 
+        env = {
             'CHRONOS_URL': 'http://@chronos:8080',
             'IRODS_HOST': host,
             'IRODS_PORT': '1247',
             'IRODS_HOME': '/{}/home/{}'.format(zone, user),
             'IRODS_USER_NAME': user,
             'IRODS_PASSWORD': password,
-            'IRODS_ZONE_NAME': zone,
-            'SSH_PUBKEY': ssh_pubkey
+            'IRODS_ZONE_NAME': zone
         }
+        if ssh_pubkey:
+            env['SSH_PUBKEY'] = ssh_pubkey
         return env
 
 
@@ -110,10 +118,7 @@ class PivotBackend(WESBackend):
                 if os.path.exists(run_json):
                     with open(run_json) as f:
                         run = json.load(f)
-                        #if run['status'] not in ['COMPLETE', 'CANCELED']:
-                            # don't query for workflows that are terminated
-                        workflow_status, app_status = self._get_pivot_job_status(run['run_id'], run_json_to_update=run_json)
-
+                        workflow_status, app_status = self._update_run_status(run['run_id'])
                         listobj = {
                             'workflow_id': run['run_id'],
                             'state': workflow_status
@@ -134,34 +139,37 @@ class PivotBackend(WESBackend):
 
     def RunWorkflow(self):
         print('REQUEST: {}'.format(vars(connexion.request)))
-	print('BODY: {}'.format(connexion.request.json))
+        print('BODY: {}'.format(connexion.request.json))
         body = connexion.request.json #json.loads(connexion.request.json)
         joborder = body['workflow_params']
-        env = self.get_env_vars(None)
+
         run_id = str(uuid.uuid4())
-        # do cleanup
-        jobstore_path = '/toil-intermediate/jobstore-wes-'+run_id
+        rundir = self.workdir + '/' + run_id
+        while os.path.exists(rundir):
+            run_id = str(uuid.uuid4()) # enforce unique among existing runs
+            rundir = workdir + '/' + run_id
+
+        if not os.path.exists(rundir):
+            os.mkdir(rundir)
+
+        env = self.get_env_vars(None)
+
+        jobstore_path = '/toil-intermediate/jobstore-wes-' + run_id
+        # do cleanup if prior jobstore exists
         if os.path.exists(jobstore_path):
             print('removing jobstore: {}'.format(jobstore_path))
             shutil.rmtree(jobstore_path)
-        
 
         # get run command
         cmd = ['sudo', 'docker', 'run', '--privileged']
-        for k,v in six.iteritems(env):
+        for k, v in six.iteritems(env):
             cmd.append('-e')
-            cmd.append('{}={}'.format(k,v))
+            cmd.append('{}={}'.format(k, v))
 
         cmd.extend(['heliumdatacommons/datacommons-base:latest', '_toil_exec'])
-        #wf_location = 'https://raw.githubusercontent.com/DataBiosphere/topmed-workflows/d40a05772f5c832fe1bdce898aaa19698b43edbd/aligner/sbg-alignment-cwl/topmed-alignment.cwl'
-        jobinput_location = '/renci/irods/home/wes_user/NWD176325-0005-recab.json'
 
-        rundir = '{workdir}/{run_id}'.format(workdir=self.workdir, run_id=run_id)
         stdout_path = rundir + '/stdout.txt'
         stderr_path = rundir + '/stderr.txt'
-        if not os.path.exists(rundir):
-            os.mkdir(rundir)
-        
         # create empty stdout file to avoid filenotfound later
         open(stdout_path, 'a').close()
 
@@ -184,13 +192,16 @@ class PivotBackend(WESBackend):
         appliance_json['containers'].remove(workflow_container)
 
         # add environment variables to container
+        # add WORKFLOW_NAME and PIVOT_URL so launcher can clean itself up
+        env['WORKFLOW_NAME'] = appliance_id
+        env['PIVOT_URL'] = self.pivot_endpoint
         workflow_container['env'] = env
 
         command = \
               'cwltoil --no-match-user --clean onSuccess --cleanWorkDir onSuccess ' \
             + '--jobStore {jobstore_path} --linkImports --not-strict ' \
             + ' --batchSystem chronos --defaultCores 16 --defaultMemory 32G --defaultDisk 30G ' \
-            + '--workDir /toil-intermediate --outdir /renci/irods/home/wes_user/toil_output ' \
+            + '--workDir /toil-intermediate --outdir /toil-intermediate/wes_output ' \
             + '{workflow_location} {jobinput_location} 2>&1 | tee {stdout}'
         command = command.format(
                 jobstore_path=jobstore_path,
@@ -205,8 +216,8 @@ class PivotBackend(WESBackend):
         appliance_json['containers'].append(workflow_container)
         print(json.dumps(appliance_json, indent=4))
         response = requests.post(self.pivot_endpoint, data=json.dumps(appliance_json))
-        if response.status_code <  400:
-            print('SUCCESS')
+        if response.status_code < 400:
+            logging.debug('Sucessfully created appliance with id: {}'.format(appliance_id))
         else:
             raise RuntimeError('failed to create appliance: {}:{}'.format(str(response), str(response.content)))
         # used to keep track of existing runs
@@ -235,12 +246,134 @@ class PivotBackend(WESBackend):
 
         return {'run_id': run_id}
 
+    """
+    Returns:
+        - None: if run container is not found in stored json
+        - str status: if status is found on workflow container in stored json
+    """
+    def _get_stored_run_status(self, run):
+        if not run or 'X-appliance_json' not in run or 'containers' not in run['X-appliance_json']:
+            return None
+        launcher_container = [c for c in run['X-appliance_json']['containers'] if c['id'] == 'toil-launcher']
+
+        if len(launcher_container) == 0:
+            status = None
+        else:
+            launcher = launcher_container[0]
+            if 'status' not in launcher:
+                launcher['status'] = 'SYSTEM_ERROR'
+            status = launcher['status']
+        logging.debug('_get_stored_run_status, status: {}'.format(status))
+        return status
+
+    """
+    Returns:
+        - (None, None): if error occurs querying for appliance in pivot
+        - ('P_NOEXIST', None): if appliance is gone and no status is queryable
+        - ('P_EXIST', None): if appliance exists but no launcher container is in it
+        - ('P_EXIST', str status): if appliance exists and launcher container has a status
+    """
+    def _get_pivot_run_status(self, run):
+        if not run:
+            return None
+
+        url = self.pivot_endpoint + '/wes-workflow-' + run['run_id']
+        resp = requests.get(url)
+        if resp.status_code == 404:
+            # gone, no status available in pivot
+            logging.info('appliance not found')
+            return ('P_NOEXIST', None)
+        elif resp.status_code > 400:
+            logging.error('error querying for appliance')
+            return (None, None)
+        else:
+            data = json.loads(resp.content.decode('utf-8'))
+            toil_launcher = [c for c in data['containers'] if c['id'] == 'toil-launcher']
+            if len(toil_launcher) == 0:
+                logging.info('toil launcher not found in appliance for run_id: {}'.format(run['run_id']))
+                return ('P_EXIST', 'SYSTEM_ERROR') # container is not in the appliance
+            else:
+                launcher = toil_launcher[0]
+
+        if launcher['state'] == 'running':
+            status = 'RUNNING'
+        elif launcher['state'] == 'success':
+            status = 'COMPLETE'
+        elif launcher['state'] in ['pending', 'staging']:
+            status = 'INITIALIZING'
+        elif launcher['state'] == 'submitted':
+            status = 'QUEUED'
+        else:
+            status = 'SYSTEM_ERROR'
+        logging.info('_get_pivot_run_status, status: {}'.format(status))
+        return ('P_EXIST', status)
+
+    """
+    Returns:
+        - (None, None): error
+        - (P_EXIST, ...): appliance still exists
+        - (P_NOEXIST, ...): appliance does not exist
+        - (..., str status): status of the run
+    """
+    def _update_run_status(self, run_id):
+        run_json = '/toil-intermediate/wes/' + run_id + '/run.json'
+        logging.info('_update_run_status for run_id: {}'.format(run_id))
+        with open(run_json) as fin:
+            run = json.load(fin)
+
+        stored_status = self._get_stored_run_status(run)
+        if stored_status not in ['COMPLETE', 'CANCELED']:
+            logging.info('querying pivot for status for run_id: {}'.format(run_id))
+            (pivot_exist, pivot_status) = self._get_pivot_run_status(run)
+        else:
+            logging.info('skipping query to pivot for run_id: {}, run is marked {}'.format(run_id, stored_status))
+            # don't do whole query to pivot if run has finished
+            # we know that the appliance was deleted so set P_NOEXIST
+            (pivot_exist, pivot_status) = ('P_NOEXIST', stored_status)
+
+        need_to_update_file = False
+        # got a status from pivot and it didn't match stored one
+        if pivot_status and pivot_status != stored_status:
+            logging.debug('updating status of run [{}] to [{}]'.format(run_id, pivot_status))
+            run['status'] = pivot_status
+            need_to_update_file = True
+        # got stored status but none from pivot, because skipped query or appliance was gone
+        elif pivot_exist == 'P_NOEXIST' and stored_status:
+            if stored_status in ['RUNNING', 'QUEUED', 'INITIALIZING']:
+                logging.info('run is marked as not finished, but appliance doesn\'t exist, updating to canceled')
+                run['status'] = 'CANCELED'
+                need_to_update_file = True
+            else:
+                run['status'] = stored_status
+
+        if need_to_update_file:
+            logging.info('updating run file for run_id: {}'.format(run_id))
+            with open(run_json, 'w') as fout:
+                json.dump(run, fout)
+
+        if not pivot_exist:
+            pivot_exist = 'P_NOEXIST'
+
+        return (run['status'], pivot_exist)
+
+    # DEPRECATED
     def _get_pivot_job_status(self, run_id, run_json_to_update=None):
         url = self.pivot_endpoint + '/wes-workflow-'+run_id
+        print('_get_pivot_job_status, url: {}'.format(url))
         response = requests.get(url)
         appliance_status = 'P_NOEXIST' # P_NOEXIST, P_EXIST
+        with open(run_json_to_update) as fin:
+            run = json.load(fin)
+            run_launcher = [o for o in run['X-appliance_json']['containers'] if o['id'] == 'toil-launcher']
+            if len(run_launcher) == 0:
+                raise RuntimeError('toil-launcher not found in run file: {}'.format(run_json_to_update))
+            else:
+                run_launcher = run_launcher[0]
+
         if response.status_code == 404:
-            status = 'CANCELED'
+            print('job not found, return {}, P_NOEXIST'.format(run_launcher['status']))
+            return run_launcher['status'], 'P_NOEXIST'
+            #status = 'CANCELED'
         elif response.status_code > 400:
             raise RuntimeError('error querying pivot: [{}]'.format(url))
         else:
@@ -266,22 +399,27 @@ class PivotBackend(WESBackend):
                 print('_get_pivot_job_status, status: {}'.format(status))
                 print('_get_pivot_job_status: {}'.format(response.content.decode('utf-8')))
 
-        if run_json_to_update:
-            with open(run_json_to_update, 'r') as fin:
-                run = json.load(fin)
-                #print(json.dumps(run))
-                run_launcher = [o for o in run['X-appliance_json']['containers'] if o['id'] == 'toil-launcher'][0]
-                if status != run['status']:
-                    run_launcher['status'] = status
-                    if status == 'CANCELED':
-                        run['end_time'] = datetime.datetime.now().isoformat()
-                        run['exit_code'] = 1
-                    elif status == 'COMPLETE':
-                        run['end_time'] = datetime.datetime.now().isoformat()
-                        run['exit_code'] = 0
+#        if run_json_to_update:
+#            with open(run_json_to_update, 'r') as fin:
+#                run = json.load(fin)
+#                #print(json.dumps(run))
+#                run_launcher = [o for o in run['X-appliance_json']['containers'] if o['id'] == 'toil-launcher'][0]
+        if status != run['status']:
+            run_launcher['status'] = status
+            run['status'] = status
+            if status == 'CANCELED':
+                run['end_time'] = datetime.datetime.now().isoformat()
+                run['exit_code'] = 1
+            elif status == 'COMPLETE':
+                run['end_time'] = datetime.datetime.now().isoformat()
+                run['exit_code'] = 0
 
-            with open(run_json_to_update, 'w') as fout:
-                json.dump(run, fout)
+            # clean up appliance
+            if status in ['CANCELED', 'COMPLETE']:
+                requests.delete(self.pivot_endpoint + '/wes-workflow-' + run_id)
+
+        with open(run_json_to_update, 'w') as fout:
+            json.dump(run, fout)
         return (status, appliance_status)
 
     def GetRunLog(self, run_id):
@@ -298,36 +436,43 @@ class PivotBackend(WESBackend):
         run_json = '/toil-intermediate/wes/'+run_id+'/run.json'
         if not os.path.exists(run_json):
             return {'msg': 'workflow run not found', 'status_code': 404}, 404
-        status, _ = self._get_pivot_job_status(run_id, run_json_to_update=run_json)
+        run_status, app_status = self._update_run_status(run_id)
         with open(run_json) as fin:
             run = json.load(fin)
 
-        return {
-                'workflow_id': run_id,
-                'state': status,
-                'request': run['request'],
-                'appliance_url': self.pivot_endpoint + '/wes-workflow-' + run_id + '/ui', # TODO Remove
-                'workflow_log': {
-                    'name': 'stdout',
-                    'start_time': run['start_time'],
-                    'end_time': run['end_time'],
-                    'exit_code': run['exit_code'],
-                    'stdout': out_data
-                }
-                #outputs
-                #task_logs
+        log = {
+            'workflow_id': run_id,
+            'state': run_status,
+            'appliance_status': app_status,
+            'request': run['request'],
+            'workflow_log': {
+                'name': 'stdout',
+                'start_time': run['start_time'],
+                'end_time': run['end_time'],
+                'exit_code': run['exit_code'],
+                'stdout': out_data
+            }
+            #outputs
+            #task_logs
         }
+        if DEBUG:
+            log['appliance_url'] = self.pivot_endpoint + '/wes-workflow-' + run_id + '/ui', # TODO Remove
+        return log
 
     def CancelRun(self, run_id):
+        logging.debug('cancel run')
         appliance_name = 'wes-workflow-' + run_id
         response = requests.delete(self.pivot_endpoint + '/' + appliance_name)
-        if response.status_code < 400:
+        if response.status_code == 404 or response.status_code < 400:
             print('success')
-            run_json = '/toil-intermediate/wes/'+run_id+'/run.json'
-            #with open(run_json, r) as f:
-            #    run = json.load(f)
-            #    run['status'] = 'CANCELED'
-            self._get_pivot_job_status(run_id, run_json_to_update=run_json)
+            run_json = '/toil-intermediate/wes/' + run_id + '/run.json'
+            print('CancelRun updating status of {} to CANCELED'.format(run_id))
+            with open(run_json) as f:
+                run = json.load(f)
+                run['status'] = 'CANCELED'
+            with open(run_json, 'w') as fout:
+                json.dump(run, fout)
+            #self._get_pivot_job_status(run_id, run_json_to_update=run_json)
             return {'workflow_id': run_id}
         else:
             return {
@@ -342,9 +487,9 @@ class PivotBackend(WESBackend):
                 'msg': 'The requested Workflow wasn\'t found',
                 'status_code': 404
             }, 404
-        state, _ = self._get_pivot_job_status(run_id, run_json_to_update=run_json)
-        with open(run_json) as f:
-            run = json.load(f)
+        state, _ = self._update_run_status(run_id)
+        #with open(run_json) as f:
+        #run = json.load(f)
         return {
             'workflow_id': run_id,
             'state': state
