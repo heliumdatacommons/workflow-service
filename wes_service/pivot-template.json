@@ -3,6 +3,7 @@
     "containers": [
         {
             "id": "zookeeper",
+            "cloud": "gcp",
             "type": "service",
             "resources": {
                 "cpus": 1,
@@ -22,6 +23,7 @@
         },
         {
             "id": "chronos",
+            "cloud": "gcp",
             "type": "service",
             "resources": {
                 "cpus": 2,
@@ -61,6 +63,7 @@
         },
         {
             "id": "toil-launcher",
+            "cloud": "gcp",
             "type": "service",
             "resources": {
                 "cpus": 2,

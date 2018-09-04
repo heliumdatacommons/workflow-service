@@ -1,10 +1,13 @@
 {
-    "auth_service_url": ,
-    "auth_service_key": ,
-    "pivot_endpoint": ,
-    "irods_user": ,
-    "irods_password": ,
-    "irods_zone": ,
-    "irods_host": ,
-    "ssh_pubkey": 
+    "auth_service_url": "",
+    "auth_service_key": "",
+    "pivot_endpoint": "",
+    "irods_user": "",
+    "irods_password": "",
+    "irods_zone": "",
+    "irods_host": "",
+    "ssh_pubkey": "",
+    "default_toil_cloud": "",
+    "default_appliance_cloud": "",
+    "chronos_instances": []
 }

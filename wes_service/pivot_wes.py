@@ -1,5 +1,7 @@
 from __future__ import print_function
+import re
 import json
+import random
 import os
 import subprocess
 import time
@@ -15,7 +17,8 @@ import flask
 import requests
 from wes_service.util import WESBackend
 
-logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 DEBUG = True
 
 """
@@ -66,9 +69,13 @@ class PivotBackend(WESBackend):
         with open('helium.json') as f:
             helium_conf = json.load(f)
         self.pivot_endpoint = helium_conf['pivot_endpoint']
-        self.workdir = '/toil-intermediate/wes'
+        self.statedirs = ['/nfs-aws', '/nfs-gcp']
+        self.workdir = '/wes'
         if not os.path.exists(self.workdir) or not os.path.isdir(self.workdir):
-            os.mkdir(self.workdir)
+            raise RuntimeError('please create /wes and chown to the user running the wes service')
+        if not os.path.exists(self.workdir + '/statemapping.json'):
+            with open(self.workdir + '/statemapping.json', 'w') as mapout:
+                json.dump({}, mapout)
 
     def get_env_vars(self, authorization):
         with open('helium.json') as f:
@@ -80,7 +87,11 @@ class PivotBackend(WESBackend):
         ssh_pubkey = helium_conf.get('ssh_pubkey', None)
         # TODO pick up user from authorization key
         env = {
-            'CHRONOS_URL': 'http://@chronos:8080',
+            #'CHRONOS_URL': 'http://@chronos:8080',
+            'TOIL_WORKER_IMAGE': 'heliumdatacommons/datacommons-base:dev',
+            'TOIL_NFS_WORKDIR_SERVER': '@nfsd:/data',
+            'TOIL_NFS_WORKDIR_MOUNT': '/workdir',
+            'CHRONOS_URL': self._select_chronos_instance(),
             'IRODS_HOST': host,
             'IRODS_PORT': '1247',
             'IRODS_HOME': '/{}/home/{}'.format(zone, user),
@@ -110,54 +121,146 @@ class PivotBackend(WESBackend):
     def ListRuns(self, page_size=None, page_token=None, state_search=None):
         runs = []
         base_url = connexion.request.base_url
-        for dirent in os.listdir(self.workdir):
-            #print('checking {}'.format(dirent))
-            d1 = os.path.join(self.workdir, dirent)
-            if os.path.isdir(d1):
-                run_json = os.path.join(d1, 'run.json')
-                if os.path.exists(run_json):
-                    with open(run_json) as f:
-                        run = json.load(f)
-                        workflow_status, app_status = self._update_run_status(run['run_id'])
-                        listobj = {
-                            'workflow_id': run['run_id'],
-                            'state': workflow_status
-                        }
-                        if DEBUG:
-                            listobj['appliance_url'] = self.pivot_endpoint + '/wes-workflow-' + listobj['workflow_id'] + '/ui'
-                            listobj['appliance_status'] = app_status
-                            listobj['workflow_log'] = base_url + '/' + run['run_id']
-                            listobj['start_time'] = run['start_time']
-                            listobj['request'] = {'workflow_descriptor': run['request']['workflow_descriptor']}
-                        runs.append(listobj)
+        for statedir in self.statedirs:
+            for dirent in os.listdir(statedir + '/wes/'):
+                d1 = os.path.join(statedir + '/wes/', dirent)
+                if os.path.isdir(d1):
+                    run_json = os.path.join(d1, 'run.json')
+                    if os.path.exists(run_json):
+                        with open(run_json) as f:
+                            run = json.load(f)
+                            workflow_status, app_status = self._update_run_status(run['run_id'], run_json)
+                            listobj = {
+                                'workflow_id': run['run_id'],
+                                'state': workflow_status
+                            }
+                            if DEBUG:
+                                listobj['appliance_url'] = self.pivot_endpoint + '/wes-workflow-' + listobj['workflow_id'] + '/ui'
+                                listobj['appliance_status'] = app_status
+                                listobj['workflow_log'] = base_url + '/' + run['run_id']
+                                listobj['start_time'] = run['start_time']
+                                listobj['request'] = {'workflow_descriptor': run['request']['workflow_descriptor']}
+                            runs.append(listobj)
+                    else:
+                        logger.warn('{} is not a workflow run'.format(dirent))
                 else:
-                    print('{} is not a workflow run'.format(dirent))
-            else:
-                print('{} is not a directory'.format(self.workdir + dirent))
+                    logger.warn('{} is not a directory'.format(d1))
 
         return {'workflows': runs}
 
+    def _select_chronos_instance(self):
+        with open('helium.json') as fin:
+            data = json.load(fin)
+        """
+        min_jobs = {'url': None, 'count': None}
+        for inst in data['chronos_instances']:
+            resp = requests.get(inst)
+            if resp.status_code > 400:
+                raise RuntimeError('failed to fetch chronos job list: ' + str(requests.status_code) + '\n' + str(requests.content))
+            job_list = json.loads(request.content.decode('utf-8'))
+            count = len(job_list)
+            if min_jobs['count'] is None or count < min_jobs['count']:
+                min_jobs['url'] = inst
+                min_jobs['count'] = count
+        return min_jobs['url']
+        """
+        inst = random.choice(data['chronos_instances'])
+        return inst
+
+    def _get_statedir(self, run_id):
+        with open(self.workdir + '/statemapping.json') as fin:
+            mapping = json.load(fin)
+            if run_id in mapping:
+                return mapping[run_id]
+        # no stored mapping, attempt to find
+        for statedir in self.statedirs:
+            p = statedir + '/wes/' + run_id
+            if os.path.exists(p):
+                mapping[run_id] = statedir
+            with open(self.workdir + '/statemapping.json', 'w') as fout:
+                json.dump(mapping, fout)
+            return statedir
+        return None
+
     def RunWorkflow(self):
-        print('REQUEST: {}'.format(vars(connexion.request)))
-        print('BODY: {}'.format(connexion.request.json))
+        with open('helium.json') as fin:
+            config = json.load(fin)
+        logger.debug('REQUEST: {}'.format(vars(connexion.request)))
+        logger.debug('BODY: {}'.format(connexion.request.json))
         body = connexion.request.json #json.loads(connexion.request.json)
         joborder = body['workflow_params']
 
-        run_id = str(uuid.uuid4())
-        rundir = self.workdir + '/' + run_id
-        while os.path.exists(rundir):
-            run_id = str(uuid.uuid4()) # enforce unique among existing runs
-            rundir = workdir + '/' + run_id
-
-        if not os.path.exists(rundir):
-            os.mkdir(rundir)
-
         env = self.get_env_vars(None)
 
-        jobstore_path = '/toil-intermediate/jobstore-wes-' + run_id
+        # set up appliance json
+        with open('pivot-template-2.json') as fin:
+            appliance_json = json.load(fin)
+        # fill out values
+        # get reference to container used to run workflow and temporarily remove from appliance
+        workflow_container = [j for j in appliance_json['containers'] if j['id'] == 'toil-launcher'][0]
+        appliance_json['containers'].remove(workflow_container)
+
+        # tags
+        tags = {}
+        if 'tags' in body:
+            tags = body['tags']
+
+        # add toil_cloud_constraint from tags, or default_toil_cloud config, or 'aws'
+        if 'toil_cloud_constraint' in tags:
+            logger.info('tags specified toil_cloud_constraint: ' + tags['toil_cloud_constraint'])
+            env['TOIL_CLOUD_CONSTRAINT'] = tags['toil_cloud_constraint']
+        else:
+            default_toil_cloud = config.get('default_toil_cloud', 'aws')
+            logger.info('setting default toil_cloud_constraint: ' + default_toil_cloud)
+            env['TOIL_CLOUD_CONSTRAINT'] = default_toil_cloud
+
+        # add appliance_cloud_constraint from tags, or default_appliance_cloud, or 'aws'
+        if 'appliance_cloud_constraint' not in tags:
+            tags['appliance_cloud_constraint'] = config.get('default_appliance_cloud', 'aws')
+            logger.info('setting default appliance_constraint: ' + tags['appliance_cloud_constraint'])
+        logger.info('Adding appliance constraint: ' + tags['appliance_cloud_constraint'])
+        for container in appliance_json['containers']:
+            container['cloud'] = tags['appliance_cloud_constraint']
+
+        # determine which NFS server to use for tracking this run
+        if 'aws' in container['cloud']:
+            state_directory = '/nfs-aws'
+        elif 'gcp' in container['cloud']:
+            state_directory = '/nfs-gcp'
+        else:
+            raise RuntimeError('could not determine state directory to use')
+        logger.debug('using {} for run states'.format(state_directory))
+
+        # create unique run_id and run directory
+        run_id = str(uuid.uuid4())
+        rundir = state_directory + '/wes/'  + run_id
+        while os.path.exists(rundir):
+            run_id = str(uuid.uuid4()) # enforce unique among existing runs
+            rundir = state_directory + '/wes/' + run_id
+        if not os.path.exists(rundir):
+            os.mkdir(rundir)
+        logger.info('this run is stored in {}'.format(rundir))
+
+        # remember which nfs directory used for this run
+        with open(self.workdir + '/statemapping.json', 'r') as mapin:
+            mapping = json.load(mapin)
+            mapping[run_id] = state_directory
+        with open(self.workdir + '/statemapping.json', 'w') as mapout:
+            json.dump(mapping, mapout)
+
+        # Replace the run uuid in the appliance json
+        appliance_id = 'wes-workflow-' + run_id
+        appliance_json['id'] = appliance_id
+        nfsd_container = [j for j in appliance_json['containers'] if j['id'] == 'nfsd'][0]
+        nfsd_container['volumes'][0]['host_path'] = nfsd_container['volumes'][0]['host_path'].replace('wf-uuid', run_id)
+
+        # determine jobstore location
+        if not os.path.exists(state_directory + '/jobstores'):
+            os.mkdir(state_directory + '/jobstores')
+        jobstore_path = state_directory + '/jobstores/jobstore-wes-' + run_id
         # do cleanup if prior jobstore exists
         if os.path.exists(jobstore_path):
-            print('removing jobstore: {}'.format(jobstore_path))
+            logger.info('removing jobstore: {}'.format(jobstore_path))
             shutil.rmtree(jobstore_path)
 
         # get run command
@@ -181,45 +284,42 @@ class PivotBackend(WESBackend):
         with open(joborder_location, 'w') as joborder_out:
             json.dump(joborder, joborder_out)
 
-        # set up appliance json
-        with open('pivot-template.json') as fin:
-            appliance_json = json.load(fin)
-        # fill out values
-        appliance_id = 'wes-workflow-' + run_id
-        appliance_json['id'] = appliance_id
-        # get reference to container used to run workflow and temporarily remove from appliance
-        workflow_container = [j for j in appliance_json['containers'] if j['id'] == 'toil-launcher'][0]
-        appliance_json['containers'].remove(workflow_container)
-
-        # add environment variables to container
-        # add WORKFLOW_NAME and PIVOT_URL so launcher can clean itself up
-        env['WORKFLOW_NAME'] = appliance_id
-        env['PIVOT_URL'] = self.pivot_endpoint
-        workflow_container['env'] = env
-
         command = \
               'cwltoil --no-match-user --clean onSuccess --cleanWorkDir onSuccess ' \
             + '--jobStore {jobstore_path} --linkImports --not-strict ' \
             + ' --batchSystem chronos --defaultCores 16 --defaultMemory 32G --defaultDisk 30G ' \
-            + '--workDir /toil-intermediate --outdir /toil-intermediate/wes_output ' \
+            + '--workDir {workdir} --outdir {workdir}/wes_output ' \
             + '{workflow_location} {jobinput_location} 2>&1 | tee {stdout}'
+        # all workers just have 1 nfs server mounted to /toil-intermediate
+        def convert_local_nfs_path_to_worker(path):
+            return re.sub(r'/nfs-[^/]+', '/toil-intermediate', path)
         command = command.format(
-                jobstore_path=jobstore_path,
-                workflow_location=wf_location,
-                jobinput_location=joborder_location,
-                stdout=stdout_path)
+            jobstore_path=convert_local_nfs_path_to_worker(jobstore_path),
+            workflow_location=wf_location,
+            jobinput_location=convert_local_nfs_path_to_worker(joborder_location),
+            stdout=convert_local_nfs_path_to_worker(stdout_path),
+            workdir=env.get('TOIL_NFS_WORKDIR_MOUNT', '/toil-intermediate'))
         workflow_container['args'] = [
             '_toil_exec',
             command
         ]
+
+        # add WORKFLOW_NAME and PIVOT_URL so launcher can clean itself up
+        env['WORKFLOW_NAME'] = appliance_id
+        env['PIVOT_URL'] = self.pivot_endpoint
+
+        workflow_container['env'] = env
+
         # add in the actual container used to run the workflow
         appliance_json['containers'].append(workflow_container)
-        print(json.dumps(appliance_json, indent=4))
+        logger.debug(json.dumps(appliance_json, indent=4))
+
         response = requests.post(self.pivot_endpoint, data=json.dumps(appliance_json))
         if response.status_code < 400:
-            logging.debug('Sucessfully created appliance with id: {}'.format(appliance_id))
+            logger.debug('Sucessfully created appliance with id: {}'.format(appliance_id))
         else:
             raise RuntimeError('failed to create appliance: {}:{}'.format(str(response), str(response.content)))
+
         # used to keep track of existing runs
         log_entry = {
             'run_id': run_id,
@@ -232,6 +332,7 @@ class PivotBackend(WESBackend):
             'end_time': '',
             'status': 'QUEUED',
             'exit_code': -1,
+            'tags': tags,
             'request': {
                 'workflow_descriptor': body.get('workflow_descriptor'),
                 'workflow_params': joborder,
@@ -240,6 +341,7 @@ class PivotBackend(WESBackend):
                 'workflow_url': body.get('workflow_url')
             }
         }
+
         log_location = rundir + '/run.json'
         with open(log_location, 'w') as run_out:
             json.dump(log_entry, run_out)
@@ -263,7 +365,7 @@ class PivotBackend(WESBackend):
             if 'status' not in launcher:
                 launcher['status'] = 'SYSTEM_ERROR'
             status = launcher['status']
-        logging.debug('_get_stored_run_status, status: {}'.format(status))
+        logger.debug('_get_stored_run_status, status: {}'.format(status))
         return status
 
     """
@@ -281,16 +383,16 @@ class PivotBackend(WESBackend):
         resp = requests.get(url)
         if resp.status_code == 404:
             # gone, no status available in pivot
-            logging.info('appliance not found')
+            #logger.debug('appliance not found')
             return ('P_NOEXIST', None)
         elif resp.status_code > 400:
-            logging.error('error querying for appliance')
+            logger.error('error querying for appliance')
             return (None, None)
         else:
             data = json.loads(resp.content.decode('utf-8'))
             toil_launcher = [c for c in data['containers'] if c['id'] == 'toil-launcher']
             if len(toil_launcher) == 0:
-                logging.info('toil launcher not found in appliance for run_id: {}'.format(run['run_id']))
+                logger.warn('toil launcher not found in appliance for run_id: {}'.format(run['run_id']))
                 return ('P_EXIST', 'SYSTEM_ERROR') # container is not in the appliance
             else:
                 launcher = toil_launcher[0]
@@ -305,7 +407,7 @@ class PivotBackend(WESBackend):
             status = 'QUEUED'
         else:
             status = 'SYSTEM_ERROR'
-        logging.info('_get_pivot_run_status, status: {}'.format(status))
+        logger.info('_get_pivot_run_status, status: {}'.format(status))
         return ('P_EXIST', status)
 
     """
@@ -315,18 +417,18 @@ class PivotBackend(WESBackend):
         - (P_NOEXIST, ...): appliance does not exist
         - (..., str status): status of the run
     """
-    def _update_run_status(self, run_id):
-        run_json = '/toil-intermediate/wes/' + run_id + '/run.json'
-        logging.info('_update_run_status for run_id: {}'.format(run_id))
-        with open(run_json) as fin:
+    def _update_run_status(self, run_id, json_path):
+#        run_json = '/toil-intermediate/wes/' + run_id + '/run.json'
+        logger.info('_update_run_status for run_id: {}'.format(run_id))
+        with open(json_path) as fin:
             run = json.load(fin)
 
         stored_status = self._get_stored_run_status(run)
         if stored_status not in ['COMPLETE', 'CANCELED']:
-            logging.info('querying pivot for status for run_id: {}'.format(run_id))
+            logger.debug('querying pivot for status for run_id: {}'.format(run_id))
             (pivot_exist, pivot_status) = self._get_pivot_run_status(run)
         else:
-            logging.info('skipping query to pivot for run_id: {}, run is marked {}'.format(run_id, stored_status))
+            logger.info('skipping query to pivot for run_id: {}, run is marked {}'.format(run_id, stored_status))
             # don't do whole query to pivot if run has finished
             # we know that the appliance was deleted so set P_NOEXIST
             (pivot_exist, pivot_status) = ('P_NOEXIST', stored_status)
@@ -334,21 +436,21 @@ class PivotBackend(WESBackend):
         need_to_update_file = False
         # got a status from pivot and it didn't match stored one
         if pivot_status and pivot_status != stored_status:
-            logging.debug('updating status of run [{}] to [{}]'.format(run_id, pivot_status))
+            logger.debug('updating status of run [{}] to [{}]'.format(run_id, pivot_status))
             run['status'] = pivot_status
             need_to_update_file = True
         # got stored status but none from pivot, because skipped query or appliance was gone
         elif pivot_exist == 'P_NOEXIST' and stored_status:
             if stored_status in ['RUNNING', 'QUEUED', 'INITIALIZING']:
-                logging.info('run is marked as not finished, but appliance doesn\'t exist, updating to canceled')
+                logger.info('run is marked as not finished, but appliance doesn\'t exist, updating to canceled')
                 run['status'] = 'CANCELED'
                 need_to_update_file = True
             else:
                 run['status'] = stored_status
 
         if need_to_update_file:
-            logging.info('updating run file for run_id: {}'.format(run_id))
-            with open(run_json, 'w') as fout:
+            logger.info('updating run file for run_id: {}'.format(run_id))
+            with open(json_path, 'w') as fout:
                 json.dump(run, fout)
 
         if not pivot_exist:
@@ -423,20 +525,24 @@ class PivotBackend(WESBackend):
         return (status, appliance_status)
 
     def GetRunLog(self, run_id):
-        #TODO careful with this data size, could be large
-        MAX_STDOUT_LEN = 500 # lines of stdout to return
-        stdout_path = '/toil-intermediate/wes/' + run_id + '/stdout.txt'
-        if os.path.exists(stdout_path):
-            with open(stdout_path) as stdout:
-                out_data = stdout.read()
-                out_data = '\n'.join(out_data.rsplit('\n', MAX_STDOUT_LEN)[1:])
-        else:
-            out_data = ''
+        stdout_path = ''
+        statedir = self._get_statedir(run_id)
+        if not statedir:
+            return {
+                'msg': 'workflow not found',
+                'status_code': 404}, 404
+        stdout_path = statedir + '/wes/' + run_id + '/stdout.txt'
+        run_json = statedir + '/wes/' + run_id + '/run.json'
+        if not (os.path.exists(stdout_path) and os.path.exists(run_json)):
+            return {'msg': 'Run with id {} not found'.format(run_id), 'status_code': 404}, 404
 
-        run_json = '/toil-intermediate/wes/'+run_id+'/run.json'
-        if not os.path.exists(run_json):
-            return {'msg': 'workflow run not found', 'status_code': 404}, 404
-        run_status, app_status = self._update_run_status(run_id)
+        #TODO careful with this data size, could be large
+        MAX_STDOUT_LEN = 2000 # lines of stdout to return
+        with open(stdout_path) as stdout:
+            out_data = stdout.read()
+            out_data = '\n'.join(out_data.rsplit('\n', MAX_STDOUT_LEN)[1:])
+
+        run_status, app_status = self._update_run_status(run_id, run_json)
         with open(run_json) as fin:
             run = json.load(fin)
 
@@ -460,13 +566,20 @@ class PivotBackend(WESBackend):
         return log
 
     def CancelRun(self, run_id):
-        logging.debug('cancel run')
+        logger.debug('cancel run')
         appliance_name = 'wes-workflow-' + run_id
-        response = requests.delete(self.pivot_endpoint + '/' + appliance_name)
+        url = self.pivot_endpoint + '/' + appliance_name
+        logger.debug('issuing delete to ' + url)
+        response = requests.delete(url)
         if response.status_code == 404 or response.status_code < 400:
-            print('success')
-            run_json = '/toil-intermediate/wes/' + run_id + '/run.json'
-            print('CancelRun updating status of {} to CANCELED'.format(run_id))
+            statedir = self._get_statedir(run_id)
+            if not statedir:
+                return {
+                    'status_code': 404,
+                    'msg': 'Run with id {} not found'.format(run_id)
+                }, 404
+            run_json = statedir + '/wes/' + run_id + '/run.json'
+            logger.info('CancelRun updating status of {} to CANCELED'.format(run_id))
             with open(run_json) as f:
                 run = json.load(f)
                 run['status'] = 'CANCELED'
@@ -481,19 +594,22 @@ class PivotBackend(WESBackend):
             }
 
     def GetRunStatus(self, run_id):
-        run_json = '/toil-intermediate/wes/' + run_id + '/run.json'
-        if not os.path.exists(run_json):
+        statedir = self._get_statedir(run_id)
+        if not statedir:
             return {
-                'msg': 'The requested Workflow wasn\'t found',
-                'status_code': 404
-            }, 404
-        state, _ = self._update_run_status(run_id)
-        #with open(run_json) as f:
-        #run = json.load(f)
+                'msg': 'workflow not found',
+                'status_code': 404}, 404
+        run_json = statedir + '/wes/' + run_id + '/run.json'
+        if os.path.exists(run_json):
+            state, _ = self._update_run_status(run_id, run_json)
+            return {
+                'workflow_id': run_id,
+                'state': state
+            }
         return {
-            'workflow_id': run_id,
-            'state': state
-        }
+            'msg': 'The requested Workflow wasn\'t found',
+            'status_code': 404
+        }, 404
 
 
 def create_backend(app, opts):

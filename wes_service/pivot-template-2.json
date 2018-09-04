@@ -1,0 +1,72 @@
+{
+    "id": "wes-workflow",
+    "containers": [
+        {
+            "id": "nfsd",
+            "type": "service",
+            "image": "heliumdatacommons/nfsd",
+            "resources": {
+                "cpus": 2,
+                "mem": 4096
+            },
+            "network_mode": "container",
+            "ports": [
+                {
+                    "container_port": 2049
+                }
+            ],
+            "volumes":[
+                {
+                    "container_path": "/data",
+                    "host_path": "/external/wf-uuid",
+                    "mode": "RW"
+                }
+            ],
+            "is_privileged": true,
+            "env": {
+                "NFS_EXPORT_0": "/data 9.0.0.0/16(rw,insecure,no_subtree_check,sync,anonuid=1000,anongid=1000,no_root_squash)"
+            },
+            "cloud": "gcp-compute",
+                "health_check": {
+                "protocol": "MESOS_TCP",
+                "port_index": 0,
+                "path": "/"
+            },
+            "minimum_capacity": 1
+        },
+        {
+            "id": "toil-launcher",
+            "cloud": "gcp-compute",
+            "type": "service",
+            "resources": {
+                "cpus": 2,
+                "mem": 2048,
+                "disk": 2048
+            },
+            "network_mode": "container",
+            "image": "heliumdatacommons/datacommons-base:dev",
+            "is_privileged": true,
+            "ports": [
+                {
+                    "container_port": 22,
+                    "host_port": 0,
+                    "protocol": "tcp"
+                }
+            ],
+            "env": {
+            },
+            "args": [
+            ],
+            "dependencies": [
+                "nfsd"
+            ],
+            "volumes": [
+                {
+                    "host_path": "/toil-intermediate",
+                    "container_path": "/toil-intermediate",
+                    "mode": "RW"
+                }
+            ]
+        }
+    ]
+}
