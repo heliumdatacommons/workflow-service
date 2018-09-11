@@ -1,4 +1,5 @@
 from __future__ import print_function
+import fcntl
 import re
 import json
 import random
@@ -76,6 +77,9 @@ class PivotBackend(WESBackend):
         if not os.path.exists(self.workdir + '/statemapping.json'):
             with open(self.workdir + '/statemapping.json', 'w') as mapout:
                 json.dump({}, mapout)
+        if not os.path.exists(self.workdir + '/schedulingstate.json'):
+            with open(self.workdir + '/schedulingstate.json', 'w') as fout:
+                json.dump({}, fout)
 
     def get_env_vars(self, authorization):
         with open('helium.json') as f:
@@ -90,7 +94,7 @@ class PivotBackend(WESBackend):
             #'CHRONOS_URL': 'http://@chronos:8080',
             'TOIL_WORKER_IMAGE': 'heliumdatacommons/datacommons-base:dev',
             'TOIL_NFS_WORKDIR_SERVER': '@nfsd:/data',
-            'TOIL_NFS_WORKDIR_MOUNT': '/workdir',
+            'TOIL_NFS_WORKDIR_MOUNT': '/nfsd',
             'CHRONOS_URL': self._select_chronos_instance(),
             'IRODS_HOST': host,
             'IRODS_PORT': '1247',
@@ -150,22 +154,58 @@ class PivotBackend(WESBackend):
 
     def _select_chronos_instance(self):
         with open('helium.json') as fin:
-            data = json.load(fin)
+            conf = json.load(fin)
+        scheduling_file = self.workdir + '/schedulingstate.json'
+        fin = open(scheduling_file)
+        fcntl.flock(fin, fcntl.LOCK_EX) # lock state file
+        scheduling = json.load(fin)
+        instances = conf['chronos_instances']
+        instances.sort()
+        
+        if 'last_used' in scheduling:
+            instances.append(scheduling['last_used'])
+            instances = list(set(instances))
+            instances.sort()
+            ni = instances.index(scheduling['last_used']) + 1
+            if ni > len(instances) - 1:
+                ni = 0
+            n = instances[ni]
+            scheduling['last_used'] = n
+        else:
+            n = instances[0]
+            scheduling['last_used'] = n
+        logger.info('writing to schedlingstate.json: ' + json.dumps(scheduling))
+ 
+        with open(scheduling_file, 'w') as fout:
+            json.dump(scheduling, fout)
+        # unlock state file
+        fcntl.flock(fin, fcntl.LOCK_UN)
+        fin.close()
+        return n
+
         """
         min_jobs = {'url': None, 'count': None}
-        for inst in data['chronos_instances']:
-            resp = requests.get(inst)
+        for inst in conf['chronos_instances']:
+            resp = requests.get(inst + '/v1/scheduler/jobs')
             if resp.status_code > 400:
-                raise RuntimeError('failed to fetch chronos job list: ' + str(requests.status_code) + '\n' + str(requests.content))
-            job_list = json.loads(request.content.decode('utf-8'))
+                logger.error('failed to fetch chronos job list: ' + str(resp.status_code)
+                    + '\n' + str(resp.content.decode('utf-8')))
+                continue
+            try:
+                job_list = json.loads(resp.content.decode('utf-8'))
+            except ValueError:
+                logger.error('could not decode response content: '  + resp.content.decode('utf-8'))
+                continue
             count = len(job_list)
             if min_jobs['count'] is None or count < min_jobs['count']:
                 min_jobs['url'] = inst
                 min_jobs['count'] = count
+        if min_jobs['url'] is None:
+            raise RuntimeError('no chronos servers responded to query')
         return min_jobs['url']
         """
-        inst = random.choice(data['chronos_instances'])
-        return inst
+        #inst = random.choice(conf['chronos_instances'])
+        #return inst
 
     def _get_statedir(self, run_id):
         with open(self.workdir + '/statemapping.json') as fin:
@@ -198,7 +238,7 @@ class PivotBackend(WESBackend):
         # fill out values
         # get reference to container used to run workflow and temporarily remove from appliance
         workflow_container = [j for j in appliance_json['containers'] if j['id'] == 'toil-launcher'][0]
-        appliance_json['containers'].remove(workflow_container)
+        #appliance_json['containers'].remove(workflow_container)
 
         # tags
         tags = {}
@@ -215,12 +255,21 @@ class PivotBackend(WESBackend):
             env['TOIL_CLOUD_CONSTRAINT'] = default_toil_cloud
 
         # add appliance_cloud_constraint from tags, or default_appliance_cloud, or 'aws'
-        if 'appliance_cloud_constraint' not in tags:
-            tags['appliance_cloud_constraint'] = config.get('default_appliance_cloud', 'aws')
-            logger.info('setting default appliance_constraint: ' + tags['appliance_cloud_constraint'])
-        logger.info('Adding appliance constraint: ' + tags['appliance_cloud_constraint'])
+        if 'appliance_storage_cloud_constraint' not in tags:
+            tags['appliance_storage_cloud_constraint'] = config.get('default_storage_appliance_cloud', 'aws')
+            logger.info('setting default appliance_storage_constraint: ' + tags['appliance_storage_cloud_constraint'])
+        if 'appliance_compute_cloud_constraint' not in tags:
+            tags['appliance_compute_cloud_constraint'] = config.get('default_compute_appliance_cloud', 'aws')
+            logger.info('settings default appliance_compute_constraint: ' + tags['appliance_compute_cloud_constraint'])
         for container in appliance_json['containers']:
-            container['cloud'] = tags['appliance_cloud_constraint']
+            if 'nfsd' in container['id']:
+                logger.info('Setting storage constraint: ' + tags['appliance_storage_cloud_constraint'])
+                container['cloud'] = tags['appliance_storage_cloud_constraint']
+            elif 'toil-launcher' in container['id']:
+                logger.info('Setting compute constraint: ' + tags['appliance_compute_cloud_constraint'])
+                container['cloud'] = tags['appliance_compute_cloud_constraint']
+            else:
+                container['cloud'] = tags['appliance_compute_cloud_constraint']
 
         # determine which NFS server to use for tracking this run
         if 'aws' in container['cloud']:
@@ -253,15 +302,20 @@ class PivotBackend(WESBackend):
         appliance_json['id'] = appliance_id
         nfsd_container = [j for j in appliance_json['containers'] if j['id'] == 'nfsd'][0]
         nfsd_container['volumes'][0]['host_path'] = nfsd_container['volumes'][0]['host_path'].replace('wf-uuid', run_id)
+        
+        # replace the run uuid in the toil-launcher appliance json
+        for v in workflow_container['volumes']:
+            if 'wf-uuid' in v['host_path']:
+                v['host_path'] = v['host_path'].replace('wf-uuid', run_id)
 
         # determine jobstore location
-        if not os.path.exists(state_directory + '/jobstores'):
-            os.mkdir(state_directory + '/jobstores')
-        jobstore_path = state_directory + '/jobstores/jobstore-wes-' + run_id
-        # do cleanup if prior jobstore exists
-        if os.path.exists(jobstore_path):
-            logger.info('removing jobstore: {}'.format(jobstore_path))
-            shutil.rmtree(jobstore_path)
+#        if not os.path.exists(state_directory + '/jobstores'):
+#            os.mkdir(state_directory + '/jobstores')
+#        jobstore_path = state_directory + '/jobstores/jobstore-wes-' + run_id
+#        # do cleanup if prior jobstore exists
+#        if os.path.exists(jobstore_path):
+#            logger.info('removing jobstore: {}'.format(jobstore_path))
+#            shutil.rmtree(jobstore_path)
 
         # get run command
         cmd = ['sudo', 'docker', 'run', '--privileged']
@@ -269,7 +323,7 @@ class PivotBackend(WESBackend):
             cmd.append('-e')
             cmd.append('{}={}'.format(k, v))
 
-        cmd.extend(['heliumdatacommons/datacommons-base:latest', '_toil_exec'])
+        cmd.extend(['heliumdatacommons/datacommons-base:dev', '_toil_exec'])
 
         stdout_path = rundir + '/stdout.txt'
         stderr_path = rundir + '/stderr.txt'
@@ -284,21 +338,27 @@ class PivotBackend(WESBackend):
         with open(joborder_location, 'w') as joborder_out:
             json.dump(joborder, joborder_out)
 
+
+        output_path = state_directory + '/output-' + run_id
+        if not os.path.exists(output_path):
+            os.mkdir(output_path)
         command = \
-              'cwltoil --no-match-user --clean onSuccess --cleanWorkDir onSuccess ' \
-            + '--jobStore {jobstore_path} --linkImports --not-strict ' \
-            + ' --batchSystem chronos --defaultCores 16 --defaultMemory 32G --defaultDisk 30G ' \
-            + '--workDir {workdir} --outdir {workdir}/wes_output ' \
+              'cwltoil --no-match-user  ' \
+            + '--jobStore {nfsd_mount}/jobstore --not-strict ' \
+            + ' --batchSystem chronos --defaultCores 8 --defaultMemory 16G --defaultDisk 16G ' \
+            + '--workDir /tmp --outdir {output_path} ' \
+            + '--tmpdir-prefix=/tmp/tmpdir --tmp-outdir-prefix={nfsd_mount}/tmpdir_out ' \
             + '{workflow_location} {jobinput_location} 2>&1 | tee {stdout}'
         # all workers just have 1 nfs server mounted to /toil-intermediate
         def convert_local_nfs_path_to_worker(path):
             return re.sub(r'/nfs-[^/]+', '/toil-intermediate', path)
         command = command.format(
-            jobstore_path=convert_local_nfs_path_to_worker(jobstore_path),
+            output_path=convert_local_nfs_path_to_worker(output_path),
+            #jobstore_path=convert_local_nfs_path_to_worker(jobstore_path),
             workflow_location=wf_location,
             jobinput_location=convert_local_nfs_path_to_worker(joborder_location),
             stdout=convert_local_nfs_path_to_worker(stdout_path),
-            workdir=env.get('TOIL_NFS_WORKDIR_MOUNT', '/toil-intermediate'))
+            nfsd_mount=env.get('TOIL_NFS_WORKDIR_MOUNT', '/toil-intermediate'))
         workflow_container['args'] = [
             '_toil_exec',
             command
@@ -311,7 +371,7 @@ class PivotBackend(WESBackend):
         workflow_container['env'] = env
 
         # add in the actual container used to run the workflow
-        appliance_json['containers'].append(workflow_container)
+        #appliance_json['containers'].append(workflow_container)
         logger.debug(json.dumps(appliance_json, indent=4))
 
         response = requests.post(self.pivot_endpoint, data=json.dumps(appliance_json))
@@ -346,7 +406,8 @@ class PivotBackend(WESBackend):
         with open(log_location, 'w') as run_out:
             json.dump(log_entry, run_out)
 
-        return {'run_id': run_id}
+        log_url = connexion.request.base_url + '/' + run_id
+        return {'run_id': run_id, 'run_log': log_url}
 
     """
     Returns:

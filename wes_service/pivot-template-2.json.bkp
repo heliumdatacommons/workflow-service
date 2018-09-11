@@ -5,17 +5,11 @@
             "id": "nfsd",
             "type": "service",
             "image": "heliumdatacommons/nfsd",
-            "force_pull_image": true,
-            "health_check": {
-                "path": "/",
-                "port_index": 0,
-                "protocol": "MESOS_TCP"
-            },
             "resources": {
-                "cpus": 2,
-                "mem": 4096
+                "cpus": 4,
+                "mem": 8192
             },
-            "network_mode": "container",
+            "network_mode": "host",
             "ports": [
                 {
                     "container_port": 2049
@@ -33,6 +27,11 @@
                 "NFS_EXPORT_0": "/data *(rw,insecure,no_subtree_check,sync,anonuid=1000,anongid=1000,no_root_squash)"
             },
             "cloud": "gcp-compute",
+                "health_check": {
+                "protocol": "MESOS_TCP",
+                "port_index": 0,
+                "path": "/"
+            },
             "minimum_capacity": 1
         },
         {
@@ -44,11 +43,15 @@
                 "mem": 2048,
                 "disk": 2048
             },
-            "network_mode": "container",
+            "network_mode": "host",
             "image": "heliumdatacommons/datacommons-base:dev",
-            "force_pull_image": true,
             "is_privileged": true,
             "ports": [
+                {
+                    "container_port": 22,
+                    "host_port": 0,
+                    "protocol": "tcp"
+                }
             ],
             "env": {
             },
