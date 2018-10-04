@@ -45,7 +45,7 @@
                 "disk": 2048
             },
             "network_mode": "container",
-            "image": "heliumdatacommons/datacommons-base:dev",
+            "image": "heliumdatacommons/datacommons-base:dev-nfs",
             "force_pull_image": true,
             "is_privileged": true,
             "ports": [

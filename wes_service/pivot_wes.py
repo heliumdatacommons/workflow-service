@@ -28,7 +28,7 @@ If invalid returns {'status_code': 401, 'msg': <msg>}
 If valid returns {'status_code': 200, 'user': <user>, 'key': <key>}
 If error returns {'status_code': 500, 'msg': <msg>}
 """
-def check_user_key():
+def check_authorization():
     valid = False
     ret_invalid = {'msg': 'The request is unauthorized.', 'status_code': 401}
     authorization = connexion.request.headers.get('Authorization', None)
@@ -40,9 +40,14 @@ def check_user_key():
     elif len(terms) >= 2:
         if terms[0] == 'APIKey':
             user_key = terms[1]
+            # check key
+        if terms[0] == 'Bearer':
+            user_token = terms[1]
+
         else:
             return ('Malformed authorization', 400)
 
+def check_user_key(user_key):
     # got a user key so check it
     with open('helium.json') as f:
         helium_conf = json.load(f)
@@ -62,7 +67,9 @@ def check_user_key():
             'key': user_key
         }
     else:
-        return ret_invalid
+        return 'The request is unauthorized'
+
+
 
 class PivotBackend(WESBackend):
     def __init__(self, opts):
@@ -92,9 +99,9 @@ class PivotBackend(WESBackend):
         # TODO pick up user from authorization key
         env = {
             #'CHRONOS_URL': 'http://@chronos:8080',
-            'TOIL_WORKER_IMAGE': 'heliumdatacommons/datacommons-base:dev',
+            'TOIL_WORKER_IMAGE': 'heliumdatacommons/datacommons-base:dev-nfs',
             'TOIL_NFS_WORKDIR_SERVER': '@nfsd:/data',
-            'TOIL_NFS_WORKDIR_MOUNT': '/nfsd',
+            'TOIL_NFS_WORKDIR_MOUNT': '/tmp',
             'CHRONOS_URL': self._select_chronos_instance(),
             'IRODS_HOST': host,
             'IRODS_PORT': '1247',
@@ -163,7 +170,9 @@ class PivotBackend(WESBackend):
         instances.sort()
         
         if 'last_used' in scheduling:
+            # add in last_used in case it was removed recently
             instances.append(scheduling['last_used'])
+            # remove duplicates
             instances = list(set(instances))
             instances.sort()
             ni = instances.index(scheduling['last_used']) + 1
@@ -318,12 +327,12 @@ class PivotBackend(WESBackend):
 #            shutil.rmtree(jobstore_path)
 
         # get run command
-        cmd = ['sudo', 'docker', 'run', '--privileged']
-        for k, v in six.iteritems(env):
-            cmd.append('-e')
-            cmd.append('{}={}'.format(k, v))
-
-        cmd.extend(['heliumdatacommons/datacommons-base:dev', '_toil_exec'])
+        #cmd = ['sudo', 'docker', 'run', '--privileged']
+        #for k, v in six.iteritems(env):
+        #    cmd.append('-e')
+        #    cmd.append('{}={}'.format(k, v))
+        #
+        #cmd.extend(['heliumdatacommons/datacommons-base:dev-nfs', '_toil_exec'])
 
         stdout_path = rundir + '/stdout.txt'
         stderr_path = rundir + '/stderr.txt'
@@ -346,8 +355,8 @@ class PivotBackend(WESBackend):
               'cwltoil --no-match-user  ' \
             + '--jobStore {nfsd_mount}/jobstore --not-strict ' \
             + ' --batchSystem chronos --defaultCores 8 --defaultMemory 16G --defaultDisk 16G ' \
-            + '--workDir /tmp --outdir {output_path} ' \
-            + '--tmpdir-prefix=/tmp/tmpdir --tmp-outdir-prefix={nfsd_mount}/tmpdir_out ' \
+            + '--workDir {nfsd_mount} --outdir {output_path} ' \
+            + '--tmpdir-prefix={nfsd_mount}/tmpdir --tmp-outdir-prefix={nfsd_mount}/tmpdir_out ' \
             + '{workflow_location} {jobinput_location} 2>&1 | tee {stdout}'
         # all workers just have 1 nfs server mounted to /toil-intermediate
         def convert_local_nfs_path_to_worker(path):

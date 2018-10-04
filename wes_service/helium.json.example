@@ -1,5 +1,5 @@
 {
-    "auth_service_url": "",
+    "auth_service_url": ,
     "auth_service_key": "",
     "pivot_endpoint": "",
     "irods_user": "",
@@ -8,6 +8,7 @@
     "irods_host": "",
     "ssh_pubkey": "",
     "default_toil_cloud": "",
-    "default_appliance_cloud": "",
+    "default_storage_appliance_cloud": "",
+    "default_compute_appliance_cloud": "",
     "chronos_instances": []
 }
