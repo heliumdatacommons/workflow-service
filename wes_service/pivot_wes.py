@@ -18,7 +18,10 @@ import flask
 import requests
 from wes_service.util import WESBackend
 
+#logging.basicConfig(level=logging.DEBUG)
+#logging.setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
+#logger.addHandler(logging.StreamHandler())
 logger.setLevel(logging.DEBUG)
 DEBUG = True
 
@@ -36,17 +39,50 @@ def check_authorization():
         return ret_invalid
     terms = authorization.split()
     if len(terms) == 1:
-        user_key = terms[0]
+        user_key = terms[0] # if scheme unspecified, infer user_key
+        return check_user_key(user_key)
     elif len(terms) >= 2:
         if terms[0] == 'APIKey':
             user_key = terms[1]
-            # check key
+            return check_user_key(user_key)
         if terms[0] == 'Bearer':
             user_token = terms[1]
+            return check_user_token(user_token)
 
-        else:
-            return ('Malformed authorization', 400)
+    return {
+        'status_code': 401,
+        'message': 'Invalid Authorization'
+    }
 
+"""
+Return (json, True/False)
+"""
+def check_user_token(user_token):
+    with open('helium.json') as f:
+        helium_conf = json.load(f)
+    auth_service_key = helium_conf['auth_service_key']
+    auth_headers = {'Authorization': 'Basic {}'.format(auth_service_key)}
+    auth_service_url = helium_conf['auth_service_url']
+    auth_response = requests.get(
+        auth_service_url + '/validate_token?access_token=' + user_token,
+        headers=auth_headers)
+    if auth_response.status_code == 200:
+        body = json.loads(auth_response.content.decode('utf-8'))
+        if body.get('active', False) == True:
+            return {
+                'status_code': 200,
+                'message': 'Successful authentication',
+                'user': body['username']
+            }
+    logger.debug('response [{}]:\n{}'.format(auth_response.status_code, auth_response.content.decode('utf-8')))
+    return {
+        'status_code': 403,
+        'message': 'Request is forbidden'
+    }
+
+"""
+Return {'status_code': X, 'message': ...., 'user': <username if valid>}
+"""
 def check_user_key(user_key):
     # got a user key so check it
     with open('helium.json') as f:
@@ -56,19 +92,19 @@ def check_user_key(user_key):
     auth_service_url = helium_conf['auth_service_url']
     auth_response = requests.get(auth_service_url + '/apikey/verify?key=' + user_key, headers=auth_headers)
     if auth_response.status_code == 200:
-        valid = True
-    content = json.loads(auth_response.content.decode('utf-8'))
-    if valid:
+        content = json.loads(auth_response.content.decode('utf-8'))
         if 'user_name' not in content:
             return ('Failed to check authorization', 500)
         return {
             'status_code': 200,
-            'user': content['user_name'],
-            'key': user_key
+            'message': 'Successful authentication',
+            'user': content['user_name']
         }
-    else:
-        return 'The request is unauthorized'
-
+    print('response [{}]:\n{}'.format(auth_response.status_code, auth_response.content.decode('utf-8')))
+    return {
+        'status_code': 403,
+        'message': 'Request is forbidden'
+    }
 
 
 class PivotBackend(WESBackend):
@@ -130,6 +166,9 @@ class PivotBackend(WESBackend):
         }
 
     def ListRuns(self, page_size=None, page_token=None, state_search=None):
+        auth_check = check_authorization()
+        if auth_check['status_code'] != 200:
+            return auth_check
         runs = []
         base_url = connexion.request.base_url
         for statedir in self.statedirs:
@@ -232,6 +271,9 @@ class PivotBackend(WESBackend):
         return None
 
     def RunWorkflow(self):
+        auth_check = check_authorization()
+        if auth_check['status_code'] != 200:
+            return auth_check
         with open('helium.json') as fin:
             config = json.load(fin)
         logger.debug('REQUEST: {}'.format(vars(connexion.request)))
@@ -595,6 +637,9 @@ class PivotBackend(WESBackend):
         return (status, appliance_status)
 
     def GetRunLog(self, run_id):
+        auth_check = check_authorization()
+        if auth_check['status_code'] != 200:
+            return auth_check
         stdout_path = ''
         statedir = self._get_statedir(run_id)
         if not statedir:
@@ -636,6 +681,9 @@ class PivotBackend(WESBackend):
         return log
 
     def CancelRun(self, run_id):
+        auth_check = check_authorization()
+        if auth_check['status_code'] != 200:
+            return auth_check
         logger.debug('cancel run')
         appliance_name = 'wes-workflow-' + run_id
         url = self.pivot_endpoint + '/' + appliance_name
@@ -664,6 +712,9 @@ class PivotBackend(WESBackend):
             }
 
     def GetRunStatus(self, run_id):
+        auth_check = check_authorization()
+        if auth_check['status_code'] != 200:
+            return auth_check
         statedir = self._get_statedir(run_id)
         if not statedir:
             return {
