@@ -168,7 +168,7 @@ class PivotBackend(WESBackend):
     def ListRuns(self, page_size=None, page_token=None, state_search=None):
         auth_check = check_authorization()
         if auth_check['status_code'] != 200:
-            return auth_check
+            return auth_check, auth_check['status_code']
         runs = []
         base_url = connexion.request.base_url
         for statedir in self.statedirs:
@@ -273,7 +273,7 @@ class PivotBackend(WESBackend):
     def RunWorkflow(self):
         auth_check = check_authorization()
         if auth_check['status_code'] != 200:
-            return auth_check
+            return auth_check, auth_check['status_code']
         with open('helium.json') as fin:
             config = json.load(fin)
         logger.debug('REQUEST: {}'.format(vars(connexion.request)))
@@ -639,7 +639,7 @@ class PivotBackend(WESBackend):
     def GetRunLog(self, run_id):
         auth_check = check_authorization()
         if auth_check['status_code'] != 200:
-            return auth_check
+            return auth_check, auth_check['status_code']
         stdout_path = ''
         statedir = self._get_statedir(run_id)
         if not statedir:
@@ -683,7 +683,7 @@ class PivotBackend(WESBackend):
     def CancelRun(self, run_id):
         auth_check = check_authorization()
         if auth_check['status_code'] != 200:
-            return auth_check
+            return auth_check, auth_check['status_code']
         logger.debug('cancel run')
         appliance_name = 'wes-workflow-' + run_id
         url = self.pivot_endpoint + '/' + appliance_name
@@ -714,7 +714,7 @@ class PivotBackend(WESBackend):
     def GetRunStatus(self, run_id):
         auth_check = check_authorization()
         if auth_check['status_code'] != 200:
-            return auth_check
+            return auth_check, auth_check['status_code']
         statedir = self._get_statedir(run_id)
         if not statedir:
             return {

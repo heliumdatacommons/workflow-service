@@ -1,0 +1,107 @@
+{
+    "id": "wes-workflow-",
+    "containers": [
+        {
+            "id": "zookeeper",
+            "cloud": "gcp",
+            "type": "service",
+            "resources": {
+                "cpus": 1,
+                "mem": 2048,
+                "disk": 2048
+            },
+            "network_mode": "container",
+            "image": "heliumdatacommons/zookeeper",
+            "is_privileged": true,
+            "ports": [
+                {
+                    "container_port": 2181,
+                    "host_port": 0,
+                    "protocol": "tcp"
+                }
+            ]
+        },
+        {
+            "id": "chronos",
+            "cloud": "gcp",
+            "type": "service",
+            "resources": {
+                "cpus": 2,
+                "mem": 4096,
+                "disk": 4096
+            },
+            "network_mode": "container",
+            "image": "heliumdatacommons/chronos",
+            "is_privileged": true,
+            "ports": [
+                {
+                    "container_port": 8080,
+                    "host_port": 0,
+                    "protocol": "tcp"
+                }
+            ],
+            "args": [
+                "--master",
+                "zk://zk-1.zk:2181,zk-2.zk:2181,zk-3.zk:2181,zk-4.zk:2181,zk-5.zk:2181/mesos",
+                "--zk_hosts",
+                "@zookeeper:2181",
+                "--revive_offers_for_new_jobs"
+            ],
+            "dependencies": [
+                "zookeeper"
+            ],
+            "health_check": {
+                "protocol": "MESOS_HTTP",
+                "port_index": 0,
+                "path": "/",
+                "grace_period_seconds": 120,
+                "timeout_seconds": 5,
+                "interval_seconds": 5,
+                "max_consecutive_failures": 10
+            },
+            "minimum_capacity": 1
+        },
+        {
+            "id": "toil-launcher",
+            "cloud": "gcp",
+            "type": "service",
+            "resources": {
+                "cpus": 2,
+                "mem": 2048,
+                "disk": 3072
+            },
+            "network_mode": "container",
+            "image": "heliumdatacommons/datacommons-base",
+            "is_privileged": true,
+            "ports": [
+                {
+                    "container_port": 22,
+                    "host_port": 0,
+                    "protocol": "tcp"
+                }
+            ],
+            "env": {
+                "CHRONOS_URL": "http://@chronos:8080",
+                "IRODS_HOST": "helium-dc.icat.irods.lan",
+                "IRODS_PORT": 1247,
+                "IRODS_HOME": "/commonssharetestZone/home/wes_user",
+                "IRODS_USER_NAME": "wes_user",
+                "IRODS_PASSWORD": "drowssap_resu_sew",
+                "IRODS_ZONE_NAME": "commonssharetestZone",
+                "TOIL_CLOUD_CONSTRAINT": "aws"
+            },
+            "args": [
+            ],
+            "dependencies": [
+                "chronos"
+            ],
+            "volumes": [
+                {
+                    "host_path": "/toil-intermediate",
+                    "container_path": "/toil-intermediate",
+                    "mode": "RW"
+                }
+            ]
+        }
+    ]
+}
